@@ -1,0 +1,415 @@
+---
+title: "Lilly Trulicity Innovid Log Level Pathing Analysis"
+output: html_notebook
+---
+### Preparation: Global setup #####################################################################################################################
+```{r setup, include=FALSE}
+rm(list=ls())
+gc(reset = TRUE)
+options(scipen = 999)
+library(RJDBC)
+library(data.table)
+library(ggplot2)
+```
+### Preparation: Connection to Redshift ######################################################################################################
+```{r}
+### Connect to Redshift
+redshift_jdbc_driver <- "~/Docs/Software/RedshiftJDBC42-no-awssdk-1.2.47.1071.jar"
+creds <- fread("~/Docs/Codes/creds.param")
+drv <- JDBC("com.amazon.redshift.jdbc42.Driver", redshift_jdbc_driver, identifier.quote="`")
+connr <- dbConnect(drv, creds$url[1], creds$un[1], creds$pw[1])
+tmp_path <- '~/Docs/Output/Temp/'
+```
+### Formatting the data and append attributes ######################################################################################################
+```{r}
+dbSendUpdate(connr, "drop table if exists ca.yj_innovid_cookie_data_formatted")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca.yj_innovid_cookie_data_formatted as
+select t1.cookieid, t1.eventtime as eventtime, t1.placement_key, t4.placement_name as placement, uniteventsname, postalcode, t1.dma_key as dma, t1.campaign_key,
+t2.campaign_name as campaign, client, t1.publisher_key, t5.publisher_name as publisher, t1.creative_key, t3.creative_name as creativename, format, duration, t6.dma_name as dmaname, unitevents, impressions, clickthroughs, completion25, completion50, completion75, completion100, awareness
+FROM ca.innovid_log_level as t1 left join ca.innovid_campaign as t2
+on t1.campaign_key = t2.campaign_key
+left join ca.innovid_creative as t3
+on t1.creative_key = t3.creative_key
+left join ca.innovid_placement as t4
+on t1.placement_key = t4.placement_key
+left join ca.innovid_publisher as t5
+on t1.publisher_key = t5.publisher_key
+left join ca.innovid_dma as t6
+on t1.dma_key = t6.dma_key
+where lower(t2.campaign_name) like '%trulicity%'
+")
+print(Sys.time())
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca.yj_innovid_cookie_data_formatted")
+print(Sys.time())
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca.yj_innovid_cookie_data_formatted where not (cookieid in ('null', '-1', '-2'))")
+print(Sys.time())
+```
+### (Pathing Analysis Deck Slide 3) Extract data for EDA analysis 
+```{sql connection=connr, output.var = "imp_by_date"}
+SELECT trunc(eventtime) as date1, 
+case when lower(campaign) like '%trulicity%' then 1 else 0 end as c1,
+count(1) as cnt, count(distinct cookieid) as cnt_id, sum(impressions) as impressions, sum(clickthroughs) as clickthroughs, 
+sum(completion25) as completion25, sum(completion50) as completion50, sum(completion75) as completion75, sum(completion100) as completion100, sum(awareness) as awareness 
+FROM ca.yj_innovid_cookie_data_formatted
+group by 1, 2
+order by 1, 2
+limit 1000
+```
+```{r}
+fwrite(imp_by_date, paste0(tmp_path,"output1.csv"))
+```
+
+### (Pathing Analysis Deck Slide 5 - 6) Extract data for EDA analysis ######################################################################################################
+```{sql connection=connr}
+select case when lower(campaign) like '%trulicity%' then 1 else 0 end as c1,
+publisher, format, duration, sum(impressions) as impressions, sum(clickthroughs) as clickthroughs, sum(completion100) as completion100
+from ca.yj_innovid_cookie_data_formatted
+group by 1, 2, 3, 4
+order by 1, 2, 3, 4
+limit 10;
+```
+###  (Pathing Analysis Deck Slide 5 - 6) 
+```{sql connection=connr, output.var = "placement_summary"}
+select case when lower(campaign) like '%trulicity%' then 1 else 0 end as c1, placement, sum(impressions) as impressions, sum(clickthroughs) as clickthroughs, sum(completion100) as completion100, sum(awareness) as awarenessss
+from ca.yj_innovid_cookie_data_formatted
+group by 1, 2
+order by 1, 2;
+```
+```{r}
+fwrite(placement_summary, paste0(tmp_path, "invd_placement_summary.csv"))
+```
+
+### (Pathing Analysis Deck Slide 4) 
+```{sql connection=connr}
+select case when lower(campaign) like '%trulicity%' then 1 else 0 end as c1,
+dmaname, sum(impressions) as impressions, sum(clickthroughs) as clickthroughs, sum(completion100) as completion100
+from ca.yj_innovid_cookie_data_formatted
+group by 1, 2
+order by 1, 2
+limit 10;
+```
+### Append KPI to impressions ######################################################################################################
+```{r}
+# dbSendUpdate(connr, "drop table if exists ca_adhoc_view.yj_invd_imp_kpi_nonnull")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_imp_kpi_nonnull as
+select t1.cookieid, t1.eventtime as eventtime_imp, t1.placement, t1.creative_key, t1.dma, t1.uniteventsname, t1.postalcode,
+t1.campaign, t1.client, t1.publisher, t1.creativename, t1.format, t1.duration, t1.dmaname, t1.unitevents, t1.impressions,
+case when (t2.eventtime >= t1.eventtime) then t2.eventtime else null end as eventtime_click,
+case when (t2.eventtime >= t1.eventtime) then t2.clickthroughs else 0 end as clickthroughs,
+case when (t6.eventtime >= t1.eventtime) then t6.eventtime else null end as eventtime_completion100,
+case when (t6.eventtime >= t1.eventtime) then t6.completion100 else 0 end as completion100
+from 
+(select * from ca.yj_innovid_cookie_data_formatted where impressions > 0 and not (cookieid in ('null', '-1', '-2'))) as t1
+left join (select * from ca.yj_innovid_cookie_data_formatted where clickthroughs > 0) as t2
+on t1.cookieid = t2.cookieid and t1.placement_key = t2.placement_key and t1.creative_key = t2.creative_key and t1.dma = t2.dma and t1.postalcode = t2.postalcode
+left join (select * from ca.yj_innovid_cookie_data_formatted where completion100 > 0) as t6
+on t1.cookieid = t6.cookieid and t1.placement_key = t6.placement_key and t1.creative_key = t6.creative_key and t1.dma = t6.dma and t1.postalcode = t6.postalcode
+")
+print(Sys.time())
+# 1h 45m 49.9s
+# if keeping null ids, 5h 46m 16.4s
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca_adhoc_view.yj_invd_imp_kpi_nonnull")
+print(Sys.time())
+```
+### Aggregate to the unique clicks ######################################################################################################
+```{r}
+# dbSendUpdate(connr, "drop table if exists ca_adhoc_view.yj_invd_imp_dsct_kpi")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_imp_dsct_kpi as
+select cookieid, eventtime_imp, placement, creative_key, dma, uniteventsname, postalcode, campaign, publisher, creativename, format, duration,
+min(eventtime_click) as eventtime_click, min(eventtime_completion100) as eventtime_completion100,
+sum(clickthroughs) as clickthroughs, sum(completion100) as completion100
+from ca_adhoc_view.yj_invd_imp_kpi_nonnull
+group by cookieid, eventtime_imp, placement, creative_key, dma, uniteventsname, postalcode, campaign, publisher, creativename, format, duration
+")
+print(Sys.time())
+# 25m 7.25s
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca_adhoc_view.yj_invd_imp_dsct_kpi")
+print(Sys.time())
+```
+### Rank ordering the impressions ######################################################################################################
+```{r}
+dbSendUpdate(connr, "drop table ca_adhoc_view.yj_invd_imp_order")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_imp_order as
+select cookieid, eventtime_imp, placement, creative_key, dma, uniteventsname, postalcode, eventtime_click, eventtime_completion100, clickthroughs, completion100, campaign, publisher, creativename, format, duration,
+       row_number() over (partition by cookieid order by eventtime_imp) as order_imp
+  from ca_adhoc_view.yj_invd_imp_dsct_kpi
+")
+print(Sys.time())
+# 19m 14.51s
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca_adhoc_view.yj_invd_imp_order")
+print(Sys.time())
+```
+####  (Pathing Analysis Deck Slide 7 & 9) diminishing returns
+```{sql connection = connr, output.var = "diminishing_returns"}
+select case when clicked_order_imp is not null then clicked_order_imp else order_imp end as order_imp, 
+       count(1) as cnt,
+       sum(case when clicked_order_imp is not null then 1 else 0 end) as clicked
+  from
+(select cookieid, 
+        first_eventtime, 
+        min_imp_with_clk as clicked_order_imp, 
+        max(order_imp) as order_imp
+   from (select t1.cookieid, 
+                case when date_diff('day', t3.first_eventtime, t1.eventtime_imp) < 31 then t1.order_imp else 1 end as order_imp,
+                case when date_diff('day', t3.first_eventtime, t2.min_eventtime_with_clk) < 31 then t2.min_imp_with_clk else null end as min_imp_with_clk, 
+                t3.first_eventtime
+           from ca_adhoc_view.yj_invd_imp_order as t1 
+      left join (select cookieid, 
+                        min(order_imp) as min_imp_with_clk, 
+                        min(eventtime_imp) as min_eventtime_with_clk
+                   from ca_adhoc_view.yj_invd_imp_order
+                  where clickthroughs > 0
+               group by cookieid) as t2
+             on t1.cookieid = t2.cookieid
+      left join (select cookieid, 
+                        min(eventtime_imp) as first_eventtime 
+                   from ca_adhoc_view.yj_invd_imp_order 
+               group by cookieid) as t3
+             on t1.cookieid = t3.cookieid)
+group by cookieid, first_eventtime, min_imp_with_clk)
+group by 1
+order by 1
+```
+```{r}
+fwrite(diminishing_returns, paste0(tmp_path, "diminishing_returns.csv"))
+```
+
+####  (Pathing Analysis Deck Slide 9) more exposures after 1st
+```{sql connection=connr, output.var="more_exposures"}
+select clicked_order_imp, order_imp, count(1) as cnt
+from (select cookieid, min_imp_with_clk as clicked_order_imp, max(order_imp) as order_imp
+from
+(select t1.cookieid, t1.order_imp, t2.min_imp_with_clk
+from ca.yj_invd_imp_order as t1 left join
+(select cookieid, min(order_imp) as min_imp_with_clk
+from ca.yj_invd_imp_order
+where clickthroughs > 0
+group by cookieid) as t2
+on t1.cookieid = t2.cookieid)
+group by cookieid, min_imp_with_clk)
+where clicked_order_imp is not null
+group by 1, 2
+order by 1, 2
+```
+```{r}
+fwrite(more_exposures, paste0(tmp_path, "more_exposures_after_1st_click_by_impression_number.csv"))
+```
+
+### (Pathing Analysis Deck Slide 8)  Prepare data for 2-imp analysis ######################################################################################################
+```{r}
+dbSendUpdate(connr, "drop table if exists ca_adhoc_view.yj_invd_2imp")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_2imp as
+select t3.*
+from (select distinct cookieid from ca_adhoc_view.yj_invd_imp_order where clickthroughs = 0 and order_imp = 1) as t1,
+(select distinct cookieid from ca_adhoc_view.yj_invd_imp_order where order_imp = 2) as t2, ca_adhoc_view.yj_invd_imp_order as t3
+where t1.cookieid = t2.cookieid and t1.cookieid = t3.cookieid and t3.order_imp < 3
+")
+print(Sys.time())
+# 8m 39.21s
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca_adhoc_view.yj_invd_2imp")
+print(Sys.time())
+```
+#### 2 different ads
+```{sql connection=connr}
+select case when t1.ad1 = t2.ad2 then 'same' else 'different' end as comparison, count(1) as cnt, sum(clickthroughs) as clickthroughs
+from (select cookieid, campaign as ad1 from ca_adhoc_view.yj_invd_2imp where order_imp = 1) as t1,
+(select cookieid, campaign as ad2, case when clickthroughs > 0 then 1 else 0 end as clickthroughs from ca_adhoc_view.yj_invd_2imp where order_imp = 2) as t2
+where t1.cookieid = t2.cookieid
+group by 1
+```
+#### 2 ads in different order
+```{sql connection=connr}
+select t1.ad1, t2.ad2, count(1) as cnt, sum(clickthroughs) as clickthroughs
+from (select cookieid, case when campaign like '%GM%' then 'GM' else 'MCM' end as ad1 from ca_adhoc_view.yj_invd_2imp where order_imp = 1) as t1,
+(select cookieid, case when campaign like '%GM%' then 'GM' else 'MCM' end as ad2, case when clickthroughs > 0 then 1 else 0 end as clickthroughs from ca_adhoc_view.yj_invd_2imp where order_imp = 2) as t2
+where t1.cookieid = t2.cookieid
+group by 1, 2
+limit 1000
+```
+### Aggregate the journey paths with up to the first 5 touchpoints ##########################################################################################
+```{r}
+dbSendUpdate(connr, "drop table ca_adhoc_view.yj_invd_first5_imp")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_first5_imp as
+select t1.cookieid, 
+t1.placement as placement1, t1.campaign as campaign1, t1.publisher as publisher1, t1.creativename as creativename1, t1.format as format1, t1.duration as duration1, case when t1.clickthroughs > 0 then 1 else 0 end as click1,
+case when t1.completion100 > 0 then 1 else 0 end as completion100_1, 
+t2.placement as placement2, t2.campaign as campaign2, t2.publisher as publisher2, t2.creativename as creativename2, t2.format as format2, t2.duration as duration2, case when t2.clickthroughs > 0 then 1 else 0 end as click2,
+case when t2.completion100 > 0 then 1 else 0 end as completion100_2, 
+t3.placement as placement3, t3.campaign as campaign3, t3.publisher as publisher3, t3.creativename as creativename3, t3.format as format3, t3.duration as duration3, case when t3.clickthroughs > 0 then 1 else 0 end as click3,
+case when t3.completion100 > 0 then 1 else 0 end as completion100_3, 
+t4.placement as placement4, t4.campaign as campaign4, t4.publisher as publisher4, t4.creativename as creativename4, t4.format as format4, t4.duration as duration4, case when t4.clickthroughs > 0 then 1 else 0 end as click4,
+case when t4.completion100 > 0 then 1 else 0 end as completion100_4, 
+t5.placement as placement5, t5.campaign as campaign5, t5.publisher as publisher5, t5.creativename as creativename5, t5.format as format5, t5.duration as duration5, case when t5.clickthroughs > 0 then 1 else 0 end as click5,
+case when t5.completion100 > 0 then 1 else 0 end as completion100_5, 
+t6.maxclick, maxcompletion100
+from 
+(select * from ca_adhoc_view.yj_invd_imp_order where order_imp = 1) as t1
+left join
+(select * from ca_adhoc_view.yj_invd_imp_order where order_imp = 2) as t2
+on t1.cookieid = t2.cookieid
+left join
+(select * from ca_adhoc_view.yj_invd_imp_order where order_imp = 3) as t3
+on t1.cookieid = t3.cookieid
+left join
+(select * from ca_adhoc_view.yj_invd_imp_order where order_imp = 4) as t4
+on t1.cookieid = t4.cookieid
+left join
+(select * from ca_adhoc_view.yj_invd_imp_order where order_imp = 5) as t5
+on t1.cookieid = t5.cookieid
+left join
+(select cookieid, max(clickthroughs) as maxclick, max(completion100) as maxcompletion100 
+from ca_adhoc_view.yj_invd_imp_order group by cookieid) as t6
+on t1.cookieid = t6.cookieid
+")
+print(Sys.time())
+# 4m 22.01s
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca_adhoc_view.yj_invd_first5_imp")
+print(Sys.time())
+```
+```{r}
+dbSendUpdate(connr, "drop table if exists ca_adhoc_view.yj_invd_first5_imp_time")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_first5_imp_time as
+select cookieid, case when eventtime_imp2 is not null then date_diff('second', eventtime_imp1, eventtime_imp2) else null end as dif12, 
+case when eventtime_imp3 is not null then date_diff('second', eventtime_imp2, eventtime_imp3) else null end as dif23, 
+case when eventtime_imp4 is not null then date_diff('second', eventtime_imp3, eventtime_imp4) else null end as dif34, 
+case when eventtime_imp5 is not null then date_diff('second', eventtime_imp4, eventtime_imp5) else null end as dif45
+from ca_adhoc_view.yj_invd_first5_imp
+where eventtime_imp2 is not null
+")
+print(Sys.time())
+dbGetQuery(connr, "select count(1), count(distinct cookieid) from ca_adhoc_view.yj_invd_first5_imp_time")
+print(Sys.time())
+```
+###  (Pathing Analysis Deck Slide 8) Check the ad performance for 2-view paths by video format
+```{sql connection=connr}
+select format1, format2, count(1) as cnt, sum(click1) as click1, sum(click2) as click2, sum(maxclick) as maxclick
+from ca_adhoc_view.yj_invd_first5_imp
+where format3 is null and format2 is not null and click1 = 0
+group by format1, format2
+order by 1, 2
+```
+### Counting the users per journey path ######################################################################################################
+```{r}
+dbSendUpdate(connr, "drop table if exists ca_adhoc_view.yj_invd_top_paths")
+print(Sys.time())
+dbSendUpdate(connr, "
+create table ca_adhoc_view.yj_invd_top_paths as
+select placement1, campaign1, publisher1, creativename1, click1, completion100_1,
+placement2, campaign2, publisher2, creativename2, click2, completion100_2,
+placement3, campaign3, publisher3, creativename3, click3, completion100_3,
+placement4, campaign4, publisher4, creativename4, click4, completion100_4,
+placement5, campaign5, publisher5, creativename5, click5, completion100_5,
+count(1) as cnt
+from ca_adhoc_view.yj_invd_first5_imp
+group by placement1, campaign1, publisher1, creativename1, click1, completion100_1,
+placement2, campaign2, publisher2, creativename2, click2, completion100_2,
+placement3, campaign3, publisher3, creativename3, click3, completion100_3,
+placement4, campaign4, publisher4, creativename4, click4, completion100_4,
+placement5, campaign5, publisher5, creativename5, click5, completion100_5
+order by count(1) desc
+")
+print(Sys.time())
+# 5m 45.98s
+dbGetQuery(connr, "select count(1) from ca_adhoc_view.yj_invd_top_paths")
+print(Sys.time())
+```
+###  (Pathing Analysis Deck Slide 14) Analysis of the time between 2 consecutive impressions.
+```{sql connection=connr, output.var="dif12"}
+select dif12 from ca_adhoc_view.yj_invd_first5_imp_time where random() < 0.01 and dif12 is not null
+```
+```{sql connection=connr, output.var="dif45"}
+select dif45 from ca_adhoc_view.yj_invd_first5_imp_time where random() < 0.01 and dif45 is not null
+```
+```{r}
+dat_plot2 <- rbind(data.table(grp = 'Imp 1 vs Imp 2', time = dif12$dif12 ), 
+                  data.table(grp = 'Imp 4 vs Imp 5', time = dif45$dif45 ))
+ggplot(dat_plot2, aes(x = time, group = grp, color = grp)) + geom_density() + scale_x_continuous(lim = c(0, 600)) + xlab("Seconds between two consecutive impressions") + ggtitle("Density of the time between two consecutive impressions") + theme_classic() + theme(legend.position="bottom", text = element_text(size=25))
+```
+###  (Pathing Analysis Deck Slide 10) Analysis of the top paths
+```{sql connection = connr}
+select cnt_cookies_nonclick1, cnt_cookies_nonclick1_click2 from
+(select sum(cnt) as cnt_cookies_nonclick1 from ca_adhoc_view.yj_invd_top_paths where click1 = 0) as t1, 
+(select sum(cnt) as cnt_cookies_nonclick1_click2 from ca_adhoc_view.yj_invd_top_paths where click1 = 0 and click2 = 1) as t2
+```
+```{sql connection = connr}
+select cnt_cookies_nonclick1_click2_ne_cre, cnt_cookies_nonclick1_click2_ne_cam, cnt_cookies_nonclick1_click2_ne_pub, cnt_cookies_nonclick1_click2_ne_pla
+from (select sum(cnt) as cnt_cookies_nonclick1_click2_ne_cre 
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and click2 = 1 and creativename1 != creativename2),
+(select sum(cnt) as cnt_cookies_nonclick1_click2_ne_cam
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and click2 = 1 and campaign1 != campaign2),
+(select sum(cnt) as cnt_cookies_nonclick1_click2_ne_pub
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and click2 = 1 and publisher1 != publisher2),
+(select sum(cnt) as cnt_cookies_nonclick1_click2_ne_pla
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and click2 = 1 and placement1 != placement2)
+```
+```{sql connection = connr, output.var = 'creative1'}
+select distinct creativename1
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and click2 = 1 and creativename1 != creativename2
+```
+```{sql connection = connr}
+select case when creativename1 = creativename2 then 'same' else 'different' end as compare_creative, click2, sum(cnt) as cnt
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and creativename2 is not null
+group by 1, 2
+```
+```{sql connection = connr, output.var = 'creative1_nonclick1'}
+select case when creativename1 = creativename2 then 'same' else 'different' end as compare_creative, 
+creativename1, creativename2, click2, sum(cnt) as cnt
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and creativename2 is not null
+group by 1, 2, 3, 4
+```
+
+```{sql connection = connr, output.var = 'creative1_nonclick1_sample1'}
+select placement1, campaign1, publisher1, click2, sum(cnt) as cnt
+from ca_adhoc_view.yj_invd_top_paths
+where click1 = 0 and creativename1 = 'Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid'
+and creativename2 = 'Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid HTML EV'
+and placement3 is null
+group by 1, 2, 3, 4
+```
+
+```{sql connection = connr}
+select case when creativename1 = creativename2 then 'same' else 'different' end as compare_creative, 
+creativename1, creativename2, click2, sum(cnt) as cnt
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 and creativename1 = 'Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid'
+and creativename2 = 'Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid HTML EV'
+and placement3 is null
+group by 1, 2, 3, 4
+```
+
+```{sql connection = connr}
+select creativename2, click2, sum(cnt) as cnt
+from ca_adhoc_view.yj_invd_top_paths 
+where click1 = 0 
+and placement1 = 'Trulicity MCM_Video_2020_Accuen_Programmatic_dCPM_Cross Device_Preroll_LAL_TTD_Site Visits_:60_NA'
+and campaign1 = 'CY20 - CY20_Q1 - Q4_Diabetes Business Unit_Trulicity_MCM_OLV_ELO_MCM_174'
+and publisher1 = 'The Trade Desk'
+and creativename1 = 'Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid'
+and placement2 = 'Trulicity MCM_Video_2020_Accuen_Programmatic_dCPM_Cross Device_Preroll_LAL_TTD_Site Visits_:60_NA'
+and campaign2 = 'CY20 - CY20_Q1 - Q4_Diabetes Business Unit_Trulicity_MCM_OLV_ELO_MCM_174'
+and publisher2 = 'The Trade Desk'
+and creativename2 in ('Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid', 'Prog_LLTR0084000H_FoodTruck_SPA_60_Innovid HTML EV')
+and placement3 is null
+group by 1, 2
+```

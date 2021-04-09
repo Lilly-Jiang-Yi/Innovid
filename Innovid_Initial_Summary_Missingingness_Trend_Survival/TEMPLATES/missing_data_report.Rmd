@@ -1,0 +1,31 @@
+---
+title: '`r params$title`'
+author: '`r params$client`'
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+  
+<style>
+div.blue { background-color:#b0c4de; border-radius: 0px; padding: 0px;}
+hr {border-top: 1px solid red;}
+</style>
+      
+<div class = "blue">
+## Missing data report
+</div>
+
+
+
+```{r fig.width = 7, fig.height = 7, echo = FALSE, fig.align = "center", results='asis' }
+
+  #all.res <<- eval_Bivariate_mods_wrapper(dat =train1, dep_var = params$CURRENT_dep_var, IVS = IVS)
+  
+  len = length(all.res)
+  for(listidx in 1:len) {
+    
+     if(class(all.res[[2]])[1] =="RecordedPlot") {plot.new()}
+      
+      #print(all.res[[listidx]]$tab)
+    print(all.res[[listidx]])
+    cat("<hr>")
+  }

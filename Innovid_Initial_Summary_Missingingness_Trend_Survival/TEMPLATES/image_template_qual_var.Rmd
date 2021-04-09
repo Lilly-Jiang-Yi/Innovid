@@ -1,0 +1,43 @@
+---
+output: html_document
+title: "`r params$set_title`"
+---
+
+
+```{r fig.width = 8, fig.height = 6, echo = FALSE, fig.align='center', results='asis'}
+
+len = length(all_res)
+
+
+#```{r fig.width = 5, fig.height = 5, echo = FALSE, fig.align='center', results='asis'}
+
+len = length(all_res)
+for(listidx in 1:len) {
+  # if(class(all_res[[1]])[1] != "kableExtra") {
+  #   plot.new()
+  # }
+  
+  if(exists("preamble", all_res[[listidx]])) {
+    cat("<hr>\n<p>", all_res[[listidx]]$preamble, "\n")
+  }
+  
+  
+  if(exists("separator", all_res[[listidx]])) {
+    cat("<hr style=solid:red;height:3px>\n<h1>", all_res[[listidx]]$separator, "</h1>\n")
+  }
+  
+  if(exists("main", all_res[[listidx]])) {
+    cat("<h3>", all_res[[listidx]]$main, "</h3>\n")
+  }
+  if(exists("tab", all_res[[listidx]])) {
+    print(all_res[[listidx]]$tab)
+  }
+  if(exists("img", all_res[[listidx]])) {
+    plot.new()
+    print(all_res[[listidx]]$img)
+  }
+  
+}
+
+```
+
